@@ -27,5 +27,5 @@ class CovarianceLoss:
         self.t_scale = t_scale
 
     def __call__(self, Fs, zeros, ts):
-        covariance = torch.exp((ts - ts.transpose()) ** 2 / self.t_scale ** 2)
-        return torch.chain_matmul(Fs.transpose(), covariance, Fs)
+        covariance = torch.exp((ts - ts.transpose(1, 0)) ** 2 / self.t_scale ** 2)
+        return torch.chain_matmul(Fs.transpose(1, 0), covariance, Fs)
