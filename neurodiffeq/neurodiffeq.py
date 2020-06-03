@@ -20,3 +20,12 @@ def diff(x, t, order=1):
         ones = torch.ones_like(der)
         der, = autograd.grad(der, t, create_graph=True, grad_outputs=ones)
     return der
+
+
+class CovarianceLoss:
+    def __init__(self, t_scale):
+        self.t_scale = t_scale
+
+    def __call__(self, Fs, zeros, ts):
+        covariance = torch.exp((ts - ts.transpose()) ** 2 / self.t_scale ** 2)
+        return torch.chain_matmul(Fs.transpose(), covariance, Fs)
