@@ -415,7 +415,7 @@ def solve_system(
         us = _trial_solution(net, nets, ts, conditions)
         Futs = ode_system(*us, ts)
         loss = sum(
-            criterion(Fut, torch.zeros_like(ts))
+            criterion(Fut, torch.zeros_like(ts), ts)
             for Fut in Futs
         )
         if additional_loss_term is not None:
@@ -457,7 +457,11 @@ def solve_system(
             all_parameters += list(net.parameters())
         optimizer = optim.Adam(all_parameters, lr=0.001)
     if not criterion:
-        criterion = nn.MSELoss()
+        _criterion = nn.MSELoss()
+        criterion = lambda Fs, zeros, ts: _criterion(Fs, zeros)
+    if isinstance(criterion, nn.modules.loss._Loss):
+        _criterion = criterion
+        criterion = lambda Fs, zeros, ts: _criterion(Fs, zeros)
     if metrics is None:
         metrics = {}
 
