@@ -22,10 +22,10 @@ def diff(x, t, order=1):
     return der
 
 
-class CovarianceLoss:
-    def __init__(self, t_scale):
-        self.t_scale = t_scale
+class SpatiallyWeightedLoss:
+    def __init__(self, sq_dist_func, x_scale):
+        self.sq_dist_func = sq_dist_func
+        self.x_scale = x_scale
 
-    def __call__(self, Fs, zeros, ts):
-        covariance = torch.exp((ts - ts.transpose(1, 0)) ** 2 / self.t_scale ** 2)
-        return torch.chain_matmul(Fs.transpose(1, 0), covariance, Fs)
+    def __call__(self, Fs, zeros, *coordinates):
+        return torch.mean((Fs ** 2) * torch.exp(- self.sq_dist_func(*coordinates) / self.x_scale ** 2))
