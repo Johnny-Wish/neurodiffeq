@@ -500,9 +500,9 @@ def solve_spherical_system(
                 if F.shape[0] < train_zeros.shape[0]:
                     print("WARNING: batch size doesn't divide training size, which could lead to unstable behaviour",
                           file=sys.stderr)
-                    loss += criterion(F, torch.zeros_like(F)) * F.shape[0] / train_zeros.shape[0]
+                    loss += criterion(F, torch.zeros_like(F), rs, thetas, phis) * F.shape[0] / train_zeros.shape[0]
                 else:
-                    loss += criterion(F, train_zeros)  # type: torch.Tensor
+                    loss += criterion(F, train_zeros, rs, thetas, phis)  # type: torch.Tensor
             train_loss_epoch += loss.item() * (batch_end - batch_start)
 
             optimizer.zero_grad()
@@ -542,7 +542,7 @@ def solve_spherical_system(
 
             Fs = pde_system(*us, rs, thetas, phis)
             for F in Fs:
-                valid_loss_epoch += criterion(F, valid_zeros).item() * (batch_end - batch_start)
+                valid_loss_epoch += criterion(F, valid_zeros, rs, thetas, phis).item() * (batch_end - batch_start)
             batch_start += batch_size
             batch_end += batch_size
 
