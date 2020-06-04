@@ -435,7 +435,11 @@ def solve_spherical_system(
             all_parameters += list(net.parameters())
         optimizer = optim.Adam(all_parameters, lr=0.001)
     if not criterion:
-        criterion = nn.MSELoss()
+        _criterion = nn.MSELoss()
+        criterion = lambda Fs, zeros, rs, thetas, phis: _criterion(Fs, zeros)
+    if isinstance(criterion, torch.nn.modules.loss._WeightedLoss):
+        _criterion = criterion
+        criterion = lambda Fs, zeros, rs, thetas, phis: _criterion(Fs, zeros)
 
     if return_internal:
         internal = {
