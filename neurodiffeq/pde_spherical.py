@@ -8,12 +8,19 @@ import pandas as pd
 import seaborn as sns
 import matplotlib
 import matplotlib.pyplot as plt
-from .spherical_harmonics import RealSphericalHarmonics
+from .function_basis import RealSphericalHarmonics
 
 from .networks import FCNN
 from .version_utils import warn_deprecate_class
+from .generator import Generator3D, GeneratorSpherical
 from inspect import signature
 from copy import deepcopy
+
+# the name ExampleGenerator3D is deprecated
+ExampleGenerator3D = warn_deprecate_class(Generator3D)
+
+# the name ExampleGeneratorSpherical is deprecated
+ExampleGeneratorSpherical = warn_deprecate_class(GeneratorSpherical)
 
 
 def _nn_output_spherical_input(net, rs, thetas, phis):
@@ -34,157 +41,6 @@ class NoConditionSpherical(BaseConditionSpherical):
         return _nn_output_spherical_input(net, r, theta, phi)
 
 
-class BaseGenerator:
-    def __init__(self, *args):
-        self.size = ...
-        raise NotImplementedError(f"Abstract class {self.__class__.__name__} cannot be instantiated")
-
-    def get_examples(self):
-        raise NotImplementedError(f"method of abstract class {self.__class__.__name__} cannot be called")
-
-
-class Generator3D(BaseGenerator):
-    """An example generator for generating 3-D training points. NOT TO BE CONFUSED with `ExampleGeneratorSpherical`
-        :param grid: The discretization of the 3 dimensions, if we want to generate points on a :math:`m \\times n \\times k` grid, then `grid` is `(m, n, k)`, defaults to `(10, 10, 10)`.
-        :type grid: tuple[int, int, int], optional
-        :param xyz_min: The lower bound of 3 dimensions, if we only care about :math:`x \\geq x_0`, :math:`y \\geq y_0`, and :math:`z \\geq z_0` then `xyz_min` is `(x_0, y_0, z_0)`, defaults to `(0.0, 0.0, 0.0)`.
-        :type xyz_min: tuple[float, float, float], optional
-        :param xyz_max: The upper bound of 3 dimensions, if we only care about :math:`x \\leq x_1`, :math:`y \\leq y_1`, and :math:`z \\leq z_1` then `xyz_max` is `(x_1, y_1, z_1)`, defaults to `(1.0, 1.0, 1.0)`.
-        :type xyz_max: tuple[float, float, float], optional
-        :param method: The distribution of the 3-D points generated. If set to 'equally-spaced', the points will be fixed to the grid specified. If set to 'equally-spaced-noisy', a normal noise will be added to the previously mentioned set of points, defaults to 'equally-spaced-noisy'.
-        :type method: str, optional
-        :raises ValueError: When provided with an unknown method.
-    """
-
-    # noinspection PyMissingConstructor
-    def __init__(self, grid=(10, 10, 10), xyz_min=(0.0, 0.0, 0.0), xyz_max=(1.0, 1.0, 1.0),
-                 method='equally-spaced-noisy'):
-        r"""Initializer method
-
-        .. note::
-            A instance method `get_examples` is dynamically created to generate 2-D training points. It will be called by the function `solve2D`.
-        """
-        self.size = grid[0] * grid[1] * grid[2]
-
-        x = torch.linspace(xyz_min[0], xyz_max[0], grid[0], requires_grad=True)
-        y = torch.linspace(xyz_min[1], xyz_max[1], grid[1], requires_grad=True)
-        z = torch.linspace(xyz_min[2], xyz_max[2], grid[2], requires_grad=True)
-        grid_x, grid_y, grid_z = torch.meshgrid(x, y, z)
-        self.grid_x, self.grid_y, self.grid_z = grid_x.flatten(), grid_y.flatten(), grid_z.flatten()
-
-        def trunc(tensor, min, max):
-            tensor[tensor < min] = min
-            tensor[tensor > max] = max
-
-        if method == 'equally-spaced':
-            self.get_examples = lambda: (self.grid_x, self.grid_y, self.grid_z)
-        elif method == 'equally-spaced-noisy':
-            self.noise_xmean = torch.zeros(self.size)
-            self.noise_ymean = torch.zeros(self.size)
-            self.noise_zmean = torch.zeros(self.size)
-            self.noise_xstd = torch.ones(self.size) * ((xyz_max[0] - xyz_min[0]) / grid[0]) / 4.0
-            self.noise_ystd = torch.ones(self.size) * ((xyz_max[1] - xyz_min[1]) / grid[1]) / 4.0
-            self.noise_zstd = torch.ones(self.size) * ((xyz_max[2] - xyz_min[2]) / grid[2]) / 4.0
-            self.get_examples = lambda: (
-                trunc(self.grid_x + torch.normal(mean=self.noise_xmean, std=self.noise_xstd), xyz_min[0], xyz_max[0]),
-                trunc(self.grid_y + torch.normal(mean=self.noise_ymean, std=self.noise_ystd), xyz_min[1], xyz_max[1]),
-                trunc(self.grid_z + torch.normal(mean=self.noise_zmean, std=self.noise_zstd), xyz_min[2], xyz_max[2]),
-            )
-        else:
-            raise ValueError(f'Unknown method: {method}')
-
-
-# the name ExampleGenerator3D is deprecated
-ExampleGenerator3D = warn_deprecate_class(Generator3D)
-
-
-class GeneratorSpherical(BaseGenerator):
-    """An example generator for generating points in spherical coordinates. NOT TO BE CONFUSED with `ExampleGenerator3D`
-    :param size: number of points in 3-D sphere
-    :type size: int
-    :param r_min: radius of the interior boundary
-    :type r_min: float, optional
-    :param r_max: radius of the exterior boundary
-    :type r_max: float, optional
-    :param method: The distribution of the 3-D points generated. If set to 'equally-radius-noisy', radius of the points will be drawn from a uniform distribution :math:`r \\sim U[r_{min}, r_{max}]`. If set to 'equally-spaced-noisy', squared radius of the points will be drawn from a uniform distribution :math:`r^2 \\sim U[r_{min}^2, r_{max}^2]`
-    :type method: str, optional
-    """
-
-    # noinspection PyMissingConstructor
-    def __init__(self, size, r_min=0., r_max=1., method='equally-spaced-noisy'):
-        if r_min < 0 or r_max < r_min:
-            raise ValueError(f"Illegal range [f{r_min}, {r_max}]")
-
-        if method == 'equally-spaced-noisy':
-            lower = r_min ** 2
-            upper = r_max ** 2
-            rng = upper - lower
-            self.get_r = lambda: torch.sqrt(rng * torch.rand(self.shape) + lower)
-        elif method == "equally-radius-noisy":
-            lower = r_min
-            upper = r_max
-            rng = upper - lower
-            self.get_r = lambda: rng * torch.rand(self.shape) + lower
-        else:
-            raise ValueError(f'Unknown method: {method}')
-
-        self.size = size  # stored for `solve_spherical_system` to access
-        self.shape = (size,)  # used for `self.get_example()`
-
-    def get_examples(self):
-        a = torch.rand(self.shape)
-        b = torch.rand(self.shape)
-        c = torch.rand(self.shape)
-        denom = a + b + c
-        # `x`, `y`, `z` here are just for computation of `theta` and `phi`
-        epsilon = 1e-6
-        x = torch.sqrt(a / denom) + epsilon
-        y = torch.sqrt(b / denom) + epsilon
-        z = torch.sqrt(c / denom) + epsilon
-        # `sign_x`, `sign_y`, `sign_z` are either -1 or +1
-        sign_x = torch.randint(0, 2, self.shape, dtype=x.dtype) * 2 - 1
-        sign_y = torch.randint(0, 2, self.shape, dtype=y.dtype) * 2 - 1
-        sign_z = torch.randint(0, 2, self.shape, dtype=z.dtype) * 2 - 1
-
-        x = x * sign_x
-        y = y * sign_y
-        z = z * sign_z
-
-        theta = torch.acos(z).requires_grad_(True)
-        phi = -torch.atan2(y, x) + np.pi  # atan2 ranges (-pi, pi] instead of [0, 2pi)
-        phi.requires_grad_(True)
-        r = self.get_r().requires_grad_(True)
-
-        return r, theta, phi
-
-
-# the name ExampleGeneratorSpherical is deprecated
-ExampleGeneratorSpherical = warn_deprecate_class(GeneratorSpherical)
-
-
-class EnsembleGenerator(BaseGenerator):
-    r"""
-    An ensemble generator for sampling points, whose `get_example` returns all the samples of its sub-generators
-    :param \*generators: a sequence of sub-generators, must have a .size field and a .get_examples() method
-    """
-
-    # noinspection PyMissingConstructor
-    def __init__(self, *generators):
-        self.generators = generators
-        self.size = sum(gen.size for gen in generators)
-
-    def get_examples(self):
-        all_examples = [gen.get_examples() for gen in self.generators]
-        # zip(*sequence) is just `unzip`ping a sequence into sub-sequences, refer to this post for more
-        # https://stackoverflow.com/questions/19339/transpose-unzip-function-inverse-of-zip
-        segmented = zip(*all_examples)
-        return [torch.cat(seg) for seg in segmented]
-
-
-# the name ExampleGeneratorSpherical is deprecated
-EnsembleExampleGenerator = warn_deprecate_class(EnsembleGenerator)
-
-
 class DirichletBVPSpherical(BaseConditionSpherical):
     """Dirichlet boundary condition for the interior and exterior boundary of the sphere, where the interior boundary is not necessarily a point
         We are solving :math:`u(t)` given :math:`u(r, \\theta, \\phi)\\bigg|_{r = r_0} = f(\\theta, \\phi)` and :math:`u(r, \\theta, \\phi)\\bigg|_{r = r_1} = g(\\theta, \\phi)`
@@ -192,11 +48,11 @@ class DirichletBVPSpherical(BaseConditionSpherical):
     :param r_0: The radius of the interior boundary. When r_0 = 0, the interior boundary is collapsed to a single point (center of the ball)
     :type r_0: float
     :param f: The value of :math:u on the interior boundary. :math:`u(r, \\theta, \\phi)\\bigg|_{r = r_0} = f(\\theta, \\phi)`.
-    :type f: function
+    :type f: callable
     :param r_1: The radius of the exterior boundary; if set to None, `g` must also be None
     :type r_1: float or None
     :param g: The value of :math:u on the exterior boundary. :math:`u(r, \\theta, \\phi)\\bigg|_{r = r_1} = g(\\theta, \\phi)`. If set to None, `r_1` must also be set to None
-    :type g: function or None
+    :type g: callable or None
     """
 
     def __init__(self, r_0, f, r_1=None, g=None):
@@ -243,9 +99,9 @@ class InfDirichletBVPSpherical(BaseConditionSpherical):
     :param r_0: The radius of the interior boundary. When r_0 = 0, the interior boundary is collapsed to a single point (center of the ball)
     :type r_0: float
     :param f: The value of :math:u on the interior boundary. :math:`u(r, \\theta, \\phi)\\bigg|_{r = r_0} = f(\\theta, \\phi)`.
-    :type f: function
+    :type f: callable
     :param g: The value of :math:u on the exterior boundary. :math:`u(r, \\theta, \\phi)\\bigg|_{r = r_1} = g(\\theta, \\phi)`.
-    :type g: function
+    :type g: callable
     :param order: The smallest :math:k that guarantees :math:`\\lim_{r \\to +\\infty} u(r, \\theta, \\phi) e^{-k r} = 0`, defaults to 1
     :type order: int or float, optional
     """
@@ -341,13 +197,13 @@ def solve_spherical(
         pde, condition, r_min=None, r_max=None,
         net=None, train_generator=None, shuffle=True, valid_generator=None, analytic_solution=None,
         optimizer=None, criterion=None, batch_size=16, max_epochs=1000,
-        monitor=None, return_internal=False, return_best=False
+        monitor=None, return_internal=False, return_best=False, harmonics_fn=None,
 ):
     """[DEPRECATED, use SphericalSolver class instead] Train a neural network to solve one PDE with spherical inputs in 3D space
 
         :param pde: The PDE to solve. If the PDE is :math:`F(u, r,\\theta, \\phi) = 0` where :math:`u` is the dependent variable and :math:`r`, :math:`\\theta` and :math:`\\phi` are the independent variables,
             then `pde` should be a function that maps :math:`(u, r, \\theta, \\phi)` to :math:`F(u, r,\\theta, \\phi)`
-        :type pde: function
+        :type pde: callable
         :param condition: The initial/boundary condition that :math:`u` should satisfy.
         :type condition: `neurodiffeq.pde_spherical.BaseConditionSpherical`
         :param r_min: radius for inner boundary; ignored if both generators are provided; optional
@@ -363,7 +219,7 @@ def solve_spherical(
         :param shuffle: Whether to shuffle the training examples every epoch, defaults to True.
         :type shuffle: bool, optional
         :param analytic_solution: analytic solution to the pde system, used for testing purposes; should map (rs, thetas, phis) to u
-        :type analytic_solution: function
+        :type analytic_solution: callable
         :param optimizer: The optimization method to use for training, defaults to None.
         :type optimizer: `torch.optim.Optimizer`, optional
         :param criterion: The loss function to use for training, defaults to None.
@@ -378,6 +234,8 @@ def solve_spherical(
         :type return_internal: bool, optional
         :param return_best: Whether to return the nets that achieved the lowest validation loss, defaults to False.
         :type return_best: bool, optional
+        :param harmonics_fn: function basis (spherical harmonics for example) if solving coefficients of a function basis; used when returning solution
+        :type harmonics_fn: callable
         :return: The solution of the PDE. The history of training loss and validation loss.
             Optionally, MSE against analytic solution, the nets, conditions, training generator, validation generator, optimizer and loss function.
             The solution is a function that has the signature `solution(xs, ys, as_type)`.
@@ -398,6 +256,7 @@ def solve_spherical(
         nets=nets, train_generator=train_generator, shuffle=shuffle, valid_generator=valid_generator,
         analytic_solutions=analytic_solutions, optimizer=optimizer, criterion=criterion, batch_size=batch_size,
         max_epochs=max_epochs, monitor=monitor, return_internal=return_internal, return_best=return_best,
+        harmonics_fn=harmonics_fn,
     )
 
 
@@ -405,13 +264,13 @@ def solve_spherical_system(
         pde_system, conditions, r_min=None, r_max=None,
         nets=None, train_generator=None, shuffle=True, valid_generator=None, analytic_solutions=None,
         optimizer=None, criterion=None, batch_size=None,
-        max_epochs=1000, monitor=None, return_internal=False, return_best=False
+        max_epochs=1000, monitor=None, return_internal=False, return_best=False, harmonics_fn=None
 ):
     """[DEPRECATED, use SphericalSolver class instead] Train a neural network to solve a PDE system with spherical inputs in 3D space
 
         :param pde_system: The PDEs ystem to solve. If the PDE is :math:`F_i(u_1, u_2, ..., u_n, r,\\theta, \\phi) = 0` where :math:`u_i` is the i-th dependent variable and :math:`r`, :math:`\\theta` and :math:`\\phi` are the independent variables,
             then `pde_system` should be a function that maps :math:`(u_1, u_2, ..., u_n, r, \\theta, \\phi)` to a list where the i-th entry is :math:`F_i(u_1, u_2, ..., u_n, r, \\theta, \\phi)`.
-        :type pde_system: function
+        :type pde_system: callable
         :param conditions: The initial/boundary conditions. The ith entry of the conditions is the condition that :math:`u_i` should satisfy.
         :type conditions: list[`neurodiffeq.pde_spherical.BaseConditionSpherical`]
         :param r_min: radius for inner boundary; ignored if both generators are provided; optional
@@ -427,7 +286,7 @@ def solve_spherical_system(
         :param shuffle: deprecated and ignored; shuffling should be implemented in genrators
         :type shuffle: bool, optional
         :param analytic_solutions: analytic solution to the pde system, used for testing purposes; should map (rs, thetas, phis) to a list of [u_1, u_2, ..., u_n]
-        :type analytic_solutions: function
+        :type analytic_solutions: callable
         :param optimizer: The optimization method to use for training, defaults to None.
         :type optimizer: `torch.optim.Optimizer`, optional
         :param criterion: The loss function to use for training, defaults to None.
@@ -442,6 +301,8 @@ def solve_spherical_system(
         :type return_internal: bool, optional
         :param return_best: Whether to return the nets that achieved the lowest validation loss, defaults to False.
         :type return_best: bool, optional
+        :param harmonics_fn: function basis (spherical harmonics for example) if solving coefficients of a function basis; used when returning solution
+        :type harmonics_fn: callable
         :return: The solution of the PDE. The history of training loss and validation loss.
             Optionally, MSE against analytic solutions, the nets, conditions, training generator, validation generator, optimizer and loss function.
             The solution is a function that has the signature `solution(xs, ys, as_type)`.
@@ -468,7 +329,7 @@ def solve_spherical_system(
     )
 
     solver.fit(max_epochs=max_epochs, monitor=monitor)
-    solution = solver.get_solution(copy=True, best=return_best)
+    solution = solver.get_solution(copy=True, best=return_best, harmonics_fn=harmonics_fn)
     ret = (solution, solver.loss)
     if analytic_solutions is not None:
         ret = ret + (solver.analytic_mse,)
@@ -551,7 +412,7 @@ class SphericalSolver:
             train_generator = GeneratorSpherical(512, r_min, r_max, method='equally-spaced-noisy')
 
         if valid_generator is None:
-            valid_generator = GeneratorSpherical(512, r_min, r_max, method='equally-spaced')
+            valid_generator = GeneratorSpherical(512, r_min, r_max, method='equally-spaced-noisy')
 
         self.analytic_solutions = analytic_solutions
         self.enforcer = enforcer
@@ -592,6 +453,8 @@ class SphericalSolver:
         # controls early stopping, should be set to False at the beginning of a `.fit()` call
         # and optionally set to False by `callbacks` in `.fit()` to support early stopping
         self._stop_training = False
+        # the _phase variable is registered for callback functions to access
+        self._phase = None
 
     @property
     def global_epoch(self):
@@ -632,6 +495,7 @@ class SphericalSolver:
         :param key: {'train', 'valid'}; dict key in self.loss / self.analytic_mse
         :type key: str
         """
+        self._phase = key
         if metric_type == 'loss':
             self.loss[key].append(value)
         elif metric_type == 'analytic_mse':
@@ -655,6 +519,7 @@ class SphericalSolver:
         """
         # the following side effects are helpful for future extension,
         # especially for additional loss term that depends on the coordinates
+        self._phase = key
         self._batch_examples[key] = [v.reshape(-1, 1) for v in self.generator[key].get_examples()]
         return self._batch_examples[key]
 
@@ -674,6 +539,7 @@ class SphericalSolver:
         :param key: {'train', 'valid'}; phase of the epoch
         :type key: str
         """
+        self._phase = key
         epoch_loss = 0.0
         epoch_analytic_mse = 0
 
@@ -709,6 +575,9 @@ class SphericalSolver:
         if key == 'train':
             self.optimizer.step()
             self.optimizer.zero_grad()
+        # update lowest_loss and best_net when validating
+        else:
+            self._update_best()
 
         # calculate mean analytic mse of all batches and register to history
         if self.analytic_solutions is not None:
@@ -755,7 +624,6 @@ class SphericalSolver:
             self.local_epoch = local_epoch
             self.run_train_epoch()
             self.run_valid_epoch()
-            self._update_best()
 
             if callbacks:
                 for cb in callbacks:
@@ -767,15 +635,17 @@ class SphericalSolver:
                         self.nets,
                         self.conditions,
                         loss_history=self.loss,
-                        analytic_mse_history=self.analytic_solutions
+                        analytic_mse_history=self.analytic_mse,
                     )
 
-    def get_solution(self, copy=True, best=True):
+    def get_solution(self, copy=True, best=True, harmonics_fn=None):
         """return a solution class
         :param copy: if True, use a deep copy of internal nets and conditions
         :type copy: bool
         :param best: if True, return the solution with lowest loss instead of the solution after the last epoch
         :type best: bool
+        :param harmonics_fn: if set, use it as function basis for returned solution
+        :type harmonics_fn: callable
         :return: trained solution
         :rtype: `neurodiffeq.pde_spherical.SolutionSpherical`
         """
@@ -785,7 +655,10 @@ class SphericalSolver:
             nets = deepcopy(nets)
             conditions = deepcopy(conditions)
 
-        return SolutionSpherical(nets, conditions)
+        if harmonics_fn:
+            return SolutionSphericalHarmonics(nets, conditions, harmonics_fn=harmonics_fn)
+        else:
+            return SolutionSpherical(nets, conditions)
 
     def get_internals(self, param_names, return_type='list'):
         """return internal variable(s) of the solver
@@ -934,7 +807,7 @@ class MonitorSpherical:
         r, theta, phi = self.r_tensor, self.theta_tensor, self.phi_tensor
         return [
             cond.enforce(net, r, theta, phi).detach().cpu().numpy()
-            for cond, net in zip(nets, conditions)
+            for net, cond in zip(nets, conditions)
         ]
 
     def check(self, nets, conditions, loss_history, analytic_mse_history=None):
@@ -1207,26 +1080,23 @@ class SolutionSphericalHarmonics(SolutionSpherical):
     :type nets: list[`torch.nn.Module`]
     :param conditions: list of conditions to be enforced on each nets; must be of the same length as nets
     :type conditions: list[BaseConditionSphericalHarmonics]
-    :param max_degree: max_degree for spherical harmonics; defaults to 4
+    :param harmonics_fn: mapping from :math:`\\theta` and :math:`\\phi` to basis functions, e.g., spherical harmonics
+    :type harmonics_fn: callable
+    :param max_degree: DEPRECATED and SUPERSEDED by harmonics_fn; highest used for the harmonic basis
     :type max_degree: int
     """
 
-    def __init__(self, nets, conditions, max_degree=4):
+    def __init__(self, nets, conditions, max_degree=None, harmonics_fn=None):
         super(SolutionSphericalHarmonics, self).__init__(nets, conditions)
-        self.max_degree = max_degree
-        self.harmonics_fn = RealSphericalHarmonics(max_degree=max_degree)
+        if (harmonics_fn is None) and (max_degree is None):
+            raise ValueError("harmonics_fn should be specified")
 
-    def _compute_u(self, net, condition, rs, thetas, phis):
-        products = condition.enforce(net, rs) * self.harmonics_fn(thetas, phis)
-        return torch.sum(products, dim=1)
+        if max_degree is not None:
+            print("`max_degree` is DEPRECATED; pass `harmonics_fn` instead, which takes precedence", file=sys.stderr)
+            self.harmonics_fn = RealSphericalHarmonics(max_degree=max_degree)
 
-
-class SolutionCylindricalFourier(SolutionSpherical):
-    def __init__(self, nets, conditions, max_degree=4):
-        from .cylindrical_fourier_series import RealFourierSeries
-        super(SolutionCylindricalFourier, self).__init__(nets, conditions)
-        self.max_degree = max_degree
-        self.harmonics_fn = RealFourierSeries(max_degree=max_degree)
+        if harmonics_fn is not None:
+            self.harmonics_fn = harmonics_fn
 
     def _compute_u(self, net, condition, rs, thetas, phis):
         products = condition.enforce(net, rs) * self.harmonics_fn(thetas, phis)
