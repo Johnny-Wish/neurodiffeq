@@ -10,8 +10,10 @@ import matplotlib.tri as tri
 
 from .networks import FCNN
 from .neurodiffeq import diff
-from .generator import Generator2D, PredefinedGenerator
+from .generators import Generator2D, PredefinedGenerator
 from .version_utils import warn_deprecate_class
+from .conditions import IrregularBoundaryCondition
+from .conditions import NoCondition, DirichletBVP2D, IBVP1D
 from copy import deepcopy
 
 ExampleGenerator2D = warn_deprecate_class(Generator2D)
@@ -21,7 +23,7 @@ PredefinedExampleGenerator2D = warn_deprecate_class(PredefinedGenerator)
 FLOAT_DTYPE=torch.float32
 
 def set_default_dtype(dtype):
-    """Set the default `dtype` of `torch.tensor` used in `neurodiffeq`.
+    r"""Set the default `dtype` of `torch.tensor` used in `neurodiffeq`.
 
     :param dtype: `torch.float`, `torch.double`, etc
     """
@@ -56,239 +58,12 @@ def _trial_solution_2input(single_net, nets, xs, ys, conditions):
     return us
 
 
-# The base class for conditions. Conditions carry the knowledge of
-# the trial solutions. They how to adjust the neural network so that
-# the transformed output satisfies the initial/boundary conditions.
-class Condition:
-
-    def __init__(self):
-        self.ith_unit = None
-
-    def set_impose_on(self, ith_unit):
-        self.ith_unit = ith_unit
-
-    def enforce(self, net, *dimensions):
-        raise NotImplementedError
-
-    def in_domain(self, *dimensions):
-        return np.ones_like(dimensions[0], dtype=bool)
-
-
-class NoCondition2D(Condition):
-    """A stand-in `Condition` that does not impose any initial/boundary conditions.
-    """
-
-    def __init__(self):
-        super().__init__()
-
-    def enforce(self, net, x, y):
-        return _network_output_2input(net, x, y, self.ith_unit)
-
-
-class DirichletBVP2D(Condition):
-    """An Dirichlet boundary value problem on a 2-D orthogonal box where :math:`x\\in[x_0, x_1]` and :math:`y\\in[y_0, y_1]`
-        We are solving :math:`u(x, t)` given:
-        :math:`u(x, y)\\bigg|_{x = x_0} = f_0(y)`;
-        :math:`u(x, y)\\bigg|_{x = x_1} = f_1(y)`;
-        :math:`u(x, y)\\bigg|_{y = y_0} = g_0(x)`;
-        :math:`u(x, y)\\bigg|_{y = y_1} = g_1(x)`.
-
-        :param x_min: The lower bound of x, the :math:`x_0`.
-        :type x_min: float
-        :param x_min_val: The boundary value when :math:`x = x_0`, the :math:`f_0(y)`.
-        :type x_min_val: function
-        :param x_max: The upper bound of x, the :math:`x_1`.
-        :type x_max: float
-        :param x_max_val: The boundary value when :math:`x = x_1`, the :math:`f_1(y)`.
-        :type x_max_val: function
-        :param y_min: The lower bound of y, the :math:`y_0`.
-        :type y_min: float
-        :param y_min_val: The boundary value when :math:`y = y_0`, the :math:`g_0(x)`.
-        :type y_min_val: function
-        :param y_max: The upper bound of y, the :math:`y_1`.
-        :type y_max: float
-        :param y_max_val: The boundary value when :math:`y = y_1`, the :math:`g_1(x)`.
-        :type y_max_val: function
-    """
-
-    def __init__(self, x_min, x_min_val, x_max, x_max_val, y_min, y_min_val, y_max, y_max_val):
-        """Initializer method
-        """
-        super().__init__()
-        self.x_min, self.x_min_val = x_min, x_min_val
-        self.x_max, self.x_max_val = x_max, x_max_val
-        self.y_min, self.y_min_val = y_min, y_min_val
-        self.y_max, self.y_max_val = y_max, y_max_val
-
-    def enforce(self, net, x, y):
-        r"""Enforce the output of a neural network to satisfy the boundary condition.
-
-            :param net: The neural network that approximates the ODE.
-            :type net: `torch.nn.Module`
-            :param x: X-coordinates of the points where the neural network output is evaluated.
-            :type x: `torch.tensor`
-            :param y: Y-coordinates of the points where the neural network output is evaluated.
-            :type y: `torch.tensor`
-            :return: The modified output which now satisfies the boundary condition.
-            :rtype: `torch.tensor`
-
-            .. note::
-                `enforce` is meant to be called by the function `solve2D`.
-        """
-        u = _network_output_2input(net, x, y, self.ith_unit)
-        x_tilde = (x-self.x_min) / (self.x_max-self.x_min)
-        y_tilde = (y-self.y_min) / (self.y_max-self.y_min)
-        Axy = (1-x_tilde)*self.x_min_val(y) + x_tilde*self.x_max_val(y) + \
-              (1-y_tilde)*( self.y_min_val(x) - ((1-x_tilde)*self.y_min_val(self.x_min * torch.ones_like(x_tilde))
-                                                  + x_tilde *self.y_min_val(self.x_max * torch.ones_like(x_tilde))) ) + \
-                 y_tilde *( self.y_max_val(x) - ((1-x_tilde)*self.y_max_val(self.x_min * torch.ones_like(x_tilde))
-                                                  + x_tilde *self.y_max_val(self.x_max * torch.ones_like(x_tilde))) )
-        return Axy + x_tilde*(1-x_tilde)*y_tilde*(1-y_tilde)*u
-
-
-class IBVP1D(Condition):
-    """An initial boundary value problem on a 1-D range where :math:`x\\in[x_0, x_1]` and time starts at :math:`t_0`
-            We are solving :math:`u(x, t)` given:
-            :math:`u(x, t)\\bigg|_{t = t_0} = u_0(x)`;
-            :math:`u(x, t)\\bigg|_{x = x_0} = g(t)` or :math:`\\displaystyle\\frac{\\partial u(x, t)}{\\partial x}\\bigg|_{x = x_0} = g(t)`;
-            :math:`u(x, t)\\bigg|_{x = x_1} = h(t)` or :math:`\\displaystyle\\frac{\\partial u(x, t)}{\\partial x}\\bigg|_{x = x_1} = h(t)`.
-
-            :param x_min: The lower bound of x, the :math:`x_0`.
-            :type x_min: float
-            :param x_max: The upper bound of x, the :math:`x_1`.
-            :type x_max: float
-            :param t_min: The initial time, the :math:`t_0`.
-            :type t_min: float
-            :param t_min_val: The initial condition, the :math:`u_0(x)`.
-            :type t_min_val: function
-            :param x_min_val: The Dirichlet boundary condition when :math:`x = x_0`, the :math:`u(x, t)\\bigg|_{x = x_0}`, defaults to None.
-            :type x_min_val: function, optional
-            :param x_min_prime: The Neumann boundary condition when :math:`x = x_0`, the :math:`\\displaystyle\\frac{\\partial u(x, t)}{\\partial x}\\bigg|_{x = x_0}`, defaults to None.
-            :type x_min_prime: function, optional
-            :param x_max_val: The Dirichlet boundary condition when :math:`x = x_1`, the :math:`u(x, t)\\bigg|_{x = x_1}`, defaults to None.
-            :type x_max_val: function, optioonal
-            :param x_max_prime: The Neumann boundary condition when :math:`x = x_1`, the :math:`\\displaystyle\\frac{\\partial u(x, t)}{\\partial x}\\bigg|_{x = x_1}`, defaults to None.
-            :type x_max_prime: function, optional
-            :raises NotImplementedError: When unimplemented boundary conditions are configured.
-        """
-
-    def __init__(
-            self, x_min, x_max, t_min, t_min_val,
-            x_min_val=None, x_min_prime=None,
-            x_max_val=None, x_max_prime=None,
-
-    ):
-        r"""Initializer method
-
-        .. note::
-            A instance method `enforce` is dynamically created to enforce initial and boundary conditions. It will be called by the function `solve2D`.
-        """
-        super().__init__()
-        self.x_min, self.x_min_val, self.x_min_prime = x_min, x_min_val, x_min_prime
-        self.x_max, self.x_max_val, self.x_max_prime = x_max, x_max_val, x_max_prime
-        self.t_min, self.t_min_val = t_min, t_min_val
-        n_conditions = sum(c is None for c in [x_min_val, x_min_prime, x_max_val, x_max_prime])
-        if n_conditions != 2:
-            raise NotImplementedError('Sorry, this boundary condition is not implemented.')
-        if self.x_min_val and self.x_max_val:
-            self.enforce = self._enforce_dd
-        elif self.x_min_val and self.x_max_prime:
-            self.enforce = self._enforce_dn
-        elif self.x_min_prime and self.x_max_val:
-            self.enforce = self._enforce_nd
-        elif self.x_min_prime and self.x_max_prime:
-            self.enforce = self._enforce_nn
-        else:
-            raise NotImplementedError('Sorry, this boundary condition is not implemented.')
-
-    # When we have Dirichlet boundary conditions on both ends of the domain:
-    def _enforce_dd(self, net, x, t):
-        uxt = _network_output_2input(net, x, t, self.ith_unit)
-
-        t_ones = torch.ones_like(t, requires_grad=True)
-        t_ones_min = self.t_min * t_ones
-
-        x_tilde = (x - self.x_min) / (self.x_max - self.x_min)
-        t_tilde = t - self.t_min
-
-        Axt = self.t_min_val(x) + \
-            x_tilde     * (self.x_max_val(t) - self.x_max_val(t_ones_min)) + \
-            (1-x_tilde) * (self.x_min_val(t) - self.x_min_val(t_ones_min))
-        return Axt + x_tilde * (1 - x_tilde) * (1 - torch.exp(-t_tilde)) * uxt
-
-    # When we have Dirichlet boundary condition on the left end of the domain
-    # and Neumann boundary condition on the right end of the domain:
-    def _enforce_dn(self, net, x, t):
-        uxt = _network_output_2input(net, x, t, self.ith_unit)
-
-        x_ones = torch.ones_like(x, requires_grad=True)
-        t_ones = torch.ones_like(t, requires_grad=True)
-        x_ones_max = self.x_max * x_ones
-        t_ones_min = self.t_min * t_ones
-        uxmaxt = _network_output_2input(net, x_ones_max, t, self.ith_unit)
-
-        x_tilde = (x-self.x_min) / (self.x_max-self.x_min)
-        t_tilde = t-self.t_min
-
-        Axt = (self.x_min_val(t) - self.x_min_val(t_ones_min)) + self.t_min_val(x) + \
-            x_tilde * (self.x_max-self.x_min) * (self.x_max_prime(t) - self.x_max_prime(t_ones_min))
-        return Axt + x_tilde*(1-torch.exp(-t_tilde))*(
-            uxt - (self.x_max-self.x_min)*diff(uxmaxt, x_ones_max) - uxmaxt
-        )
-
-    # When we have Neumann boundary condition on the left end of the domain
-    # and Dirichlet boundary condition on the right end of the domain:
-    def _enforce_nd(self, net, x, t):
-        uxt = _network_output_2input(net, x, t, self.ith_unit)
-
-        x_ones = torch.ones_like(x, requires_grad=True)
-        t_ones = torch.ones_like(t, requires_grad=True)
-        x_ones_min = self.x_min * x_ones
-        t_ones_min = self.t_min * t_ones
-        uxmint = _network_output_2input(net, x_ones_min, t, self.ith_unit)
-
-        x_tilde = (x - self.x_min) / (self.x_max - self.x_min)
-        t_tilde = t - self.t_min
-
-        Axt = (self.x_max_val(t) - self.x_max_val(t_ones_min)) + self.t_min_val(x) + \
-              (x_tilde - 1) * (self.x_max - self.x_min) * (self.x_min_prime(t) - self.x_min_prime(t_ones_min))
-        return Axt + (1 - x_tilde) * (1 - torch.exp(-t_tilde)) * (
-                uxt + (self.x_max - self.x_min) * diff(uxmint, x_ones_min) - uxmint
-        )
-
-    # When we have Neumann boundary conditions on both ends of the domain:
-    def _enforce_nn(self, net, x, t):
-        uxt = _network_output_2input(net, x, t, self.ith_unit)
-
-        x_ones = torch.ones_like(x, requires_grad=True)
-        t_ones = torch.ones_like(t, requires_grad=True)
-        x_ones_min = self.x_min * x_ones
-        x_ones_max = self.x_max * x_ones
-        t_ones_min = self.t_min * t_ones
-        uxmint = _network_output_2input(net, x_ones_min, t, self.ith_unit)
-        uxmaxt = _network_output_2input(net, x_ones_max, t, self.ith_unit)
-
-        x_tilde = (x - self.x_min) / (self.x_max - self.x_min)
-        t_tilde = t - self.t_min
-
-        Axt = self.t_min_val(x) - 0.5 * (1 - x_tilde) ** 2 * (self.x_max - self.x_min) * (
-                self.x_min_prime(t) - self.x_min_prime(t_ones_min)
-        ) + 0.5 * x_tilde ** 2 * (self.x_max - self.x_min) * (
-                      self.x_max_prime(t) - self.x_max_prime(t_ones_min)
-              )
-        return Axt + (1 - torch.exp(-t_tilde)) * (
-                uxt - x_tilde * (self.x_max - self.x_min) * diff(uxmint, x_ones_min) \
-                + 0.5 * x_tilde ** 2 * (self.x_max - self.x_min) * (
-                        diff(uxmint, x_ones_min) - diff(uxmaxt, x_ones_max)
-                ))
-
-
 class Monitor2D:
-    """A monitor for checking the status of the neural network during training.
+    r"""A monitor for checking the status of the neural network during training.
 
-    :param xy_min: The lower bound of 2 dimensions, if we only care about :math:`x \\geq x_0` and :math:`y \\geq y_0`, then `xy_min` is `(x_0, y_0)`.
+    :param xy_min: The lower bound of 2 dimensions, if we only care about :math:`x \geq x_0` and :math:`y \geq y_0`, then `xy_min` is `(x_0, y_0)`.
     :type xy_min: tuple[float, float], optional
-    :param xy_max: The upper boound of 2 dimensions, if we only care about :math:`x \\leq x_1` and :math:`y \\leq y_1`, then `xy_min` is `(x_1, y_1)`.
+    :param xy_max: The upper boound of 2 dimensions, if we only care about :math:`x \leq x_1` and :math:`y \leq y_1`, then `xy_min` is `(x_1, y_1)`.
     :type xy_max: tuple[float, float], optional
     :param check_every: The frequency of checking the neural network represented by the number of epochs between two checks, defaults to 100.
     :type check_every: int, optional
@@ -319,8 +94,9 @@ class Monitor2D:
         ys = ys[triang.triangles].mean(axis=1)
         if condition:
             xs, ys = torch.tensor(xs), torch.tensor(ys)
-            in_domain = condition.in_domain(xs, ys)
-            triang.set_mask(~in_domain)
+            if isinstance(condition, IrregularBoundaryCondition):
+                in_domain = condition.in_domain(xs, ys)
+                triang.set_mask(~in_domain)
 
         contour = ax.tricontourf(triang, zs, cmap='coolwarm')
         ax.set_xlabel('x')
@@ -337,7 +113,7 @@ class Monitor2D:
         :param nets: The neural networks that approximates the PDE.
         :type nets: list [`torch.nn.Module`]
         :param conditions: The initial/boundary condition of the PDE.
-        :type conditions: list [`neurodiffeq.pde.DirichletBVP2D` or `neurodiffeq.pde.IBVP1D` or `neurodiffeq.pde.NoCondition`]
+        :type conditions: list [`neurodiffeq.conditions.BaseCondition`]
         :param history: The history of training loss and validation loss. The 'train' entry is a list of training loss and 'valid' entry is a list of validation loss.
         :type history: dict['train': list[float], 'valid': list[float]]
 
@@ -403,16 +179,16 @@ def solve2D(
         max_epochs=1000,
         monitor=None, return_internal=False, return_best=False
 ):
-    """Train a neural network to solve a PDE with 2 independent variables.
+    r"""Train a neural network to solve a PDE with 2 independent variables.
 
     :param pde: The PDE to solve. If the PDE is :math:`F(u, x, y) = 0` where :math:`u` is the dependent variable and :math:`x` and :math:`y` are the independent variables,
         then `pde` should be a function that maps :math:`(u, x, y)` to :math:`F(u, x, y)`.
     :type pde: function
     :param condition: The initial/boundary condition.
-    :type condition: `neurodiffeq.pde.DirichletBVP2D` or `neurodiffeq.pde.IBVP1D` or `neurodiffeq.pde.NoCondition`
-    :param xy_min: The lower bound of 2 dimensions, if we only care about :math:`x \\geq x_0` and :math:`y \\geq y_0`, then `xy_min` is `(x_0, y_0)`, only needed when train_generator and valid_generator are not specified, defaults to None
+    :type condition: `neurodiffeq.conditions.BaseCondition`
+    :param xy_min: The lower bound of 2 dimensions, if we only care about :math:`x \geq x_0` and :math:`y \geq y_0`, then `xy_min` is `(x_0, y_0)`, only needed when train_generator and valid_generator are not specified, defaults to None
     :type xy_min: tuple[float, float], optional
-    :param xy_max: The upper bound of 2 dimensions, if we only care about :math:`x \\leq x_1` and :math:`y \\leq y_1`, then `xy_min` is `(x_1, y_1)`, only needed when train_generator and valid_generator are not specified, defaults to None
+    :param xy_max: The upper bound of 2 dimensions, if we only care about :math:`x \leq x_1` and :math:`y \leq y_1`, then `xy_min` is `(x_1, y_1)`, only needed when train_generator and valid_generator are not specified, defaults to None
     :type xy_max: tuple[float, float], optional
     :param net: The neural network used to approximate the solution, defaults to None.
     :type net: `torch.nn.Module`, optional
@@ -463,16 +239,16 @@ def solve2D_system(
         max_epochs=1000,
         monitor=None, return_internal=False, return_best=False
 ):
-    """Train a neural network to solve a PDE with 2 independent variables.
+    r"""Train a neural network to solve a PDE with 2 independent variables.
 
         :param pde_system: The PDEsystem to solve. If the PDE is :math:`F_i(u_1, u_2, ..., u_n, x, y) = 0` where :math:`u_i` is the i-th dependent variable and :math:`x` and :math:`y` are the independent variables,
             then `pde_system` should be a function that maps :math:`(u_1, u_2, ..., u_n, x, y)` to a list where the i-th entry is :math:`F_i(u_1, u_2, ..., u_n, x, y)`.
         :type pde_system: function
         :param conditions: The initial/boundary conditions. The ith entry of the conditions is the condition that :math:`x_i` should satisfy.
-        :type conditions: list[`neurodiffeq.pde.DirichletBVP2D` or `neurodiffeq.pde.IBVP1D` or `neurodiffeq.pde.NoCondition`]
-        :param xy_min: The lower bound of 2 dimensions, if we only care about :math:`x \\geq x_0` and :math:`y \\geq y_0`, then `xy_min` is `(x_0, y_0)`, only needed when train_generator or valid_generator are not specified, defaults to None
+        :type conditions: list[`neurodiffeq.conditions.BaseCondition`]
+        :param xy_min: The lower bound of 2 dimensions, if we only care about :math:`x \geq x_0` and :math:`y \geq y_0`, then `xy_min` is `(x_0, y_0)`, only needed when train_generator or valid_generator are not specified, defaults to None
         :type xy_min: tuple[float, float], optional
-        :param xy_max: The upper bound of 2 dimensions, if we only care about :math:`x \\leq x_1` and :math:`y \\leq y_1`, then `xy_min` is `(x_1, y_1)`, only needed when train_generator or valid_generator are not specified, defaults to None
+        :param xy_max: The upper bound of 2 dimensions, if we only care about :math:`x \leq x_1` and :math:`y \leq y_1`, then `xy_min` is `(x_1, y_1)`, only needed when train_generator or valid_generator are not specified, defaults to None
         :type xy_max: tuple[float, float], optional
         :param single_net: The single neural network used to approximate the solution. Only one of `single_net` and `nets` should be specified, defaults to None
         :param single_net: `torch.nn.Module`, optional
@@ -650,14 +426,14 @@ def solve2D_system(
 
 
 class Solution:
-    """A solution to an PDE (system)
+    r"""A solution to an PDE (system)
 
     :param single_net: The neural networks that approximates the PDE.
     :type single_net: `torch.nn.Module`
     :param nets: The neural networks that approximates the PDE.
     :type nets: list[`torch.nn.Module`]
     :param conditions: The initial/boundary conditions of the ODE (system).
-    :type conditions: list[`neurodiffeq.ode.IVP` or `neurodiffeq.ode.DirichletBVP` or `neurodiffeq.pde.NoCondition`]
+    :type conditions: list[`neurodiffeq.conditions.BaseCondition`]
     """
     def __init__(self, single_net, nets, conditions):
         """Initializer method
@@ -697,7 +473,7 @@ class Solution:
 
 
 def make_animation(solution, xs, ts):
-    """Create animation of 1-D time-dependent problems.
+    r"""Create animation of 1-D time-dependent problems.
 
     :param solution: solution function returned by `solve2D` (for a 1-D time-dependent problem).
     :type solution: function
@@ -740,7 +516,7 @@ ALPHA = 5.0
 
 
 class Point:
-    """A 2D point.
+    r"""A 2D point.
 
     :param loc: the location of the point in the form of :math:`(x, y)`
     :type loc: tuple[float, float]
@@ -755,7 +531,7 @@ class Point:
 
 
 class DirichletControlPoint(Point):
-    """A 2D point on the Dirichlet boundary.
+    r"""A 2D point on the Dirichlet boundary.
 
     :param loc: the location of the point in the form of :math:`(x, y)`
     :type loc: tuple[float, float]
@@ -773,7 +549,7 @@ class DirichletControlPoint(Point):
 
 # TODO: Irregular Neumann boundary conditions are not working yet.
 class NeumannControlPoint(Point):
-    """A 2D point on the Neumann boundary.
+    r"""A 2D point on the Neumann boundary.
 
     :param loc: the location of the point in the form of :math:`(x, y)`
     :type loc: tuple[float, float]
@@ -792,8 +568,8 @@ class NeumannControlPoint(Point):
         self.normal_vector = tuple(d / scale for d in normal_vector)
 
 
-class CustomBoundaryCondition(Condition):
-    """A boundary condition with irregular shape.
+class CustomBoundaryCondition(IrregularBoundaryCondition):
+    r"""A boundary condition with irregular shape.
 
     :param center_point: A point that roughly locate at the center of the domain. It will be used to sort the control points 'clockwise'.
     :type center_point: `pde.Point`
